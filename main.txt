@@ -1,0 +1,278 @@
+DROP SEQUENCE Numerotation;
+DROP TABLE Compte CASCADE CONSTRAINTS;
+DROP TABLE Valeur CASCADE CONSTRAINTS;
+DROP TABLE Operation CASCADE CONSTRAINTS;
+DROP TABLE Portefeuille CASCADE CONSTRAINTS;
+DROP TABLE Historique CASCADE CONSTRAINTS;
+
+
+CREATE SEQUENCE Numerotation START WITH 1 INCREMENT BY 1;
+
+
+---------------------------------------CREATION DES TABLES---------------------------------------
+CREATE TABLE Compte (NumCompte NUMBER(5) PRIMARY KEY,
+					NomClient VARCHAR2(15) CHECK (Trim(NomClient)IS NOT NULL),
+					DateOuverture date NOT NULL,
+					Solde NUMBER(12,2) CHECK(Solde>=0) NOT NULL,
+					PMVR NUMBER(10,2) DEFAULT 0 NOT NULL
+					);
+/
+
+CREATE TABLE Valeur (CodeValeur VARCHAR2(5) PRIMARY KEY,
+					Denomination VARCHAR2(15) NOT NULL,
+					SecteurEconomique VARCHAR2(15),
+					Indice VARCHAR2(10),
+					Cours NUMBER(10,3) CHECK(Cours>=0) NOT NULL
+					);
+/
+
+CREATE TABLE Operation (NumOp NUMBER(3) PRIMARY KEY,
+					NumCompte NUMBER(5) NOT NULL REFERENCES Compte(NumCompte),
+					CodeValeur VARCHAR2(5) NOT NULL REFERENCES Valeur(CodeValeur),
+					DateOp date NOT NULL,
+					Nature VARCHAR2(1) CHECK(Nature IN('A','V')) NOT NULL,
+					QteOP NUMBER(5) NOT NULL,
+					Montant NUMBER(10,2)
+					);
+/
+
+CREATE TABLE Portefeuille (NumCompte NUMBER(3) REFERENCES Compte(NumCompte),
+					CodeValeur VARCHAR2(5) NOT NULL REFERENCES Valeur(CodeValeur),
+					Quantite NUMBER(5) NOT NULL,
+					PAM NUMBER(8,3),
+					PMVL NUMBER(8,3),
+					PRIMARY KEY (NumCompte, CodeValeur)
+					);
+/
+
+
+CREATE TABLE Historique (DateModification date,
+					CodeValeur VARCHAR2(5) REFERENCES Valeur(CodeValeur),
+					OldCours NUMBER(10) CHECK(OldCours>=0),
+					NewCours NUMBER(10) CHECK(NewCours>=0)
+					);
+/
+------------------------------------------TRIGGER COMPTE--------------------------------------------------------
+
+CREATE OR REPLACE TRIGGER Compte
+BEFORE INSERT ON Compte FOR EACH ROW
+BEGIN
+	IF (:New.NomClient = NULL) THEN
+		DBMS_OUTPUT.PUT_LINE('Erreur, nom du client vide, ou une chaîne composée uniquement d espace');
+		RAISE_APPLICATION_ERROR(-20063,'Erreur');
+	END IF;
+	IF (:New.Solde < 0) THEN
+		DBMS_OUTPUT.PUT_LINE('Erreur, solde négatif');
+		RAISE_APPLICATION_ERROR(-20067,'Erreur');
+	END IF;
+END;
+/
+
+------------------------------------------TRIGGER VALEUR--------------------------------------------------------
+
+CREATE OR REPLACE TRIGGER AddValeurs
+BEFORE INSERT ON Valeur FOR EACH ROW
+BEGIN
+	IF (:New.Cours < 0) THEN
+		DBMS_OUTPUT.PUT_LINE('Erreur, cours est négatif');
+		RAISE_APPLICATION_ERROR(-20079,'Erreur');
+		ROLLBACK;
+	END IF;
+END;
+/
+
+-----------------------------------FONCTION DE RECHERCHE-----------------------------------------------
+
+CREATE OR REPLACE FUNCTION InPortefeuille(numcpt in NUMBER, codVal in VARCHAR2) Return NUMBER
+IS
+	v_NumCompte Portefeuille.NumCompte%TYPE;
+	v_CodeValeur Portefeuille.CodeValeur%TYPE;
+	v_Quantite Portefeuille.Quantite%TYPE;
+	v_PAM Portefeuille.PAM%TYPE;
+	v_PMVL Portefeuille.PMVL%TYPE;
+
+	v_trouve NUMBER;
+
+	CURSOR liste IS 
+		SELECT *
+		FROM Portefeuille;
+BEGIN
+	
+	v_trouve := 0;
+
+	OPEN liste;
+	LOOP
+		FETCH liste INTO v_NumCompte, v_CodeValeur, v_Quantite, v_PAM, v_PMVL;
+		EXIT WHEN liste%NOTFOUND;
+
+		IF ((v_NumCompte = numcpt) AND (v_CodeValeur = codVal)) THEN
+			v_trouve := v_trouve +1;
+		END IF;
+	END LOOP;
+	CLOSE liste;
+
+	RETURN v_trouve;
+END;
+/
+
+-------------------------------------------------TRIGGER OPERATION-------------------------------------------------------
+
+CREATE OR REPLACE TRIGGER Operation
+BEFORE INSERT ON Operation FOR EACH ROW
+DECLARE
+	v_DateOuverture Compte.DateOuverture%TYPE;
+	v_Solde Compte.Solde%TYPE;
+	v_Quantite Portefeuille.Quantite%TYPE;
+	v_PMVR Compte.PMVR%TYPE;
+	v_PAM Portefeuille.PAM%TYPE;
+	v_PMVL Portefeuille.PMVL%TYPE;
+	v_Cours Valeur.Cours%TYPE;
+	v_trouve NUMBER;
+
+BEGIN
+	:New.NumOp := Numerotation.NEXTVAL;
+	SELECT DateOuverture INTO v_DateOuverture FROM Compte WHERE NumCompte = :New.NumCompte;
+	IF (:New.DateOp <= v_DateOuverture) THEN
+		DBMS_OUTPUT.PUT_LINE('Erreur, date de l opération inférieur ou égal à la date d ouverture de compte');
+		RAISE_APPLICATION_ERROR(-20138,'Erreur');
+	END IF;
+	IF (:New.DateOp > sysdate) THEN
+		DBMS_OUTPUT.PUT_LINE('Erreur, la date de l operation est supérieur à la date du jour');
+		RAISE_APPLICATION_ERROR(-20143,'Erreur');
+	END IF;
+	IF (:New.QteOP < 0) THEN
+		DBMS_OUTPUT.PUT_LINE('Erreur, la quantite de l Operation est négative ou null');
+		RAISE_APPLICATION_ERROR(-20148,'Erreur');
+	END IF;
+	IF (:New.Montant < 0) THEN
+		DBMS_OUTPUT.PUT_LINE('Erreur, le montant est négatif');
+		RAISE_APPLICATION_ERROR(-20150,'Erreur');
+	END IF;
+
+
+	IF(:New.Nature = 'A') THEN
+		SELECT Solde INTO v_Solde FROM Compte WHERE NumCompte = :New.NumCompte;
+		IF (:New.Montant > v_Solde) THEN
+			DBMS_OUTPUT.PUT_LINE('Erreur, le montant de l achat est supérieur au solde du compte');
+			RAISE_APPLICATION_ERROR(-20158,'Erreur');
+		END IF;
+
+		v_Solde := v_Solde - :New.Montant;
+		UPDATE Compte SET Solde = v_Solde WHERE NumCompte = :New.NumCompte;
+
+		v_trouve := InPortefeuille(:New.NumCompte, :New.CodeValeur);
+		IF (v_trouve = 0) THEN
+			INSERT INTO Portefeuille VALUES (:New.NumCompte, :New.CodeValeur, 0, 0, 0);
+		END IF;
+
+		SELECT Cours INTO v_Cours FROM Valeur WHERE CodeValeur = :New.CodeValeur;
+		SELECT Quantite INTO v_Quantite FROM Portefeuille WHERE NumCompte = :New.NumCompte AND CodeValeur = :New.CodeValeur;
+		SELECT PAM INTO v_PAM FROM Portefeuille WHERE NumCompte = :New.NumCompte AND CodeValeur = :New.CodeValeur;
+		v_PAM := v_Quantite * v_PAM;
+		v_PAM := v_PAM + :New.Montant;
+		v_Quantite := v_Quantite + :New.QteOP;
+		v_PAM := v_PAM/v_Quantite;
+		v_PMVL := (v_Cours-v_PAM)*v_Quantite;
+		UPDATE Portefeuille SET Quantite = v_Quantite, PAM = v_PAM, PMVL = v_PMVL WHERE NumCompte = :New.NumCompte AND CodeValeur = :New.CodeValeur;
+	END IF;
+
+	IF(:New.Nature = 'V') THEN
+
+		v_trouve := InPortefeuille(:New.NumCompte, :New.CodeValeur);
+		IF (v_trouve > 0) THEN
+			SELECT Quantite INTO v_Quantite FROM Portefeuille WHERE NumCompte = :New.NumCompte AND CodeValeur = :New.CodeValeur;
+		ELSE
+			DBMS_OUTPUT.PUT_LINE('Erreur, La valeur n est pas dans le portefeuille ou c est une vente à découvert');
+			RAISE_APPLICATION_ERROR(-20187,'Erreur');
+		END IF;
+
+		IF (:New.QteOP > v_Quantite) THEN
+			DBMS_OUTPUT.PUT_LINE('Erreur, la quantite de l operation de vente supérieur à la quantite du portefeuille');
+			RAISE_APPLICATION_ERROR(-20192,'Erreur');
+		END IF;
+
+		
+		SELECT PMVR INTO v_PMVR FROM Compte WHERE NumCompte = :New.NumCompte;
+		SELECT PAM INTO v_PAM FROM Portefeuille WHERE NumCompte = :New.NumCompte AND CodeValeur = :New.CodeValeur;
+		SELECT Cours INTO v_Cours FROM Valeur WHERE CodeValeur = :New.CodeValeur;
+		v_Quantite := v_Quantite - :New.QteOP;
+		IF(v_Quantite = 0)THEN
+			UPDATE Portefeuille SET Quantite = v_Quantite, PMVL = v_PMVL WHERE NumCompte = :New.NumCompte AND CodeValeur = :New.CodeValeur;
+			DELETE FROM Portefeuille WHERE Quantite = 0;
+		ELSE
+			v_PMVL := (v_Cours-v_PAM)*v_Quantite;
+			UPDATE Portefeuille SET Quantite = v_Quantite, PAM = v_PAM, PMVL = v_PMVL WHERE NumCompte = :New.NumCompte AND CodeValeur = :New.CodeValeur;
+		END IF;
+
+		SELECT Solde INTO v_Solde FROM Compte WHERE NumCompte = :New.NumCompte;
+		v_Solde := v_Solde + :New.Montant;
+		UPDATE Compte SET Solde = v_Solde WHERE NumCompte = :New.NumCompte;
+
+		v_PMVR := v_PMVR + (:New.Montant - (v_PAM * :New.QteOP));
+		UPDATE Compte SET PMVR = v_PMVR WHERE NumCompte = :New.NumCompte;
+	END IF;
+END;
+/
+
+
+
+-------------------------------------------------TRIGGER HISTORIQUE---------------------------------------------------
+
+CREATE OR REPLACE TRIGGER Historique
+BEFORE UPDATE ON Valeur
+FOR EACH ROW
+BEGIN
+	INSERT INTO Historique VALUES (sysdate, :Old.CodeValeur, :Old.Cours, :New.Cours);
+END;
+/
+
+-------------------------------------------------TRIGGER UPDATE VALEUR---------------------------------------------------
+
+CREATE OR REPLACE TRIGGER UpValeurs
+BEFORE UPDATE ON Valeur
+FOR EACH ROW
+DECLARE
+	v_NumCompte Portefeuille.NumCompte%TYPE;
+	v_CodeValeur Portefeuille.CodeValeur%TYPE;
+	v_Quantite Portefeuille.Quantite%TYPE;
+	v_PAM Portefeuille.PAM%TYPE;
+	v_PMVL Portefeuille.PMVL%TYPE;
+
+	v_NomClient Compte.NomClient%TYPE;
+
+	v_NewPMVL Portefeuille.PMVL%TYPE;
+	v_90PAM NUMBER;
+
+	CURSOR liste IS 
+		SELECT *
+		FROM Portefeuille;
+BEGIN
+
+	v_CodeValeur := :New.CodeValeur;
+	OPEN liste;
+	LOOP
+		FETCH liste INTO v_NumCompte, v_CodeValeur, v_Quantite, v_PAM, v_PMVL;
+		EXIT WHEN liste%NOTFOUND;
+
+		v_NewPMVL := (:New.cours - v_PAM)*v_Quantite;
+
+		IF((v_NewPMVL < v_PMVL) AND (v_CodeValeur = :New.CodeValeur)) THEN
+			DBMS_OUTPUT.PUT_LINE('Le PMVL diminue pour la valeur ' ||v_CodeValeur);
+		END IF;
+
+		IF((v_NewPMVL > v_PMVL) AND (v_CodeValeur = v_CodeValeur)) THEN
+			DBMS_OUTPUT.PUT_LINE('Le PMVL augmente pour la valeur ' ||v_CodeValeur);
+		END IF;
+
+		UPDATE Portefeuille SET PMVL = v_NewPMVL WHERE CodeValeur = :New.CodeValeur;
+
+		v_90PAM := v_PAM * 0.9;
+
+		IF((:New.cours < v_90PAM)AND(v_CodeValeur = :New.CodeValeur)) THEN
+			SELECT NomClient INTO v_NomClient FROM Compte WHERE NumCompte = v_NumCompte;
+			DBMS_OUTPUT.PUT_LINE('ALERTE!!!! ' ||v_NomClient|| ' ,' ||:New.Denomination|| ' , le cours est inférieur au PAM');
+		END IF;
+	END LOOP;
+	CLOSE liste;
+END;
+/
